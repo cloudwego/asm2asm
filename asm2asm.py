@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import math
 import os
 import sys
 import string
@@ -1136,9 +1137,10 @@ class PrototypeMap(Dict[str, Prototype]):
                 # function names must be identifiers
                 if not name.isidentifier():
                     raise cls._err('invalid function prototype: ' + name)
-                
+                if not name.startswith('F'):
+                    raise cls._err('please do not declare func stub with `F` prefix')
                 # register a empty prototype
-                ret[name] = Prototype(None, [])
+                ret[name[1:]] = Prototype(None, [])
                 idx += 1
                 
             else:      
@@ -1719,6 +1721,7 @@ class BasicBlock:
 CLANG_JUMPTABLE_LABLE = 'LJTI'
 
 class CodeSection:
+    name   : str
     dead   : bool
     export : bool
     blocks : List[BasicBlock]
@@ -1726,7 +1729,8 @@ class CodeSection:
     jmptabs: Dict[str, List[BasicBlock]]
     funcs  : Dict[str, Pcsp]
 
-    def __init__(self):
+    def __init__(self, name: str):
+        self.name = name
         self.dead   = False
         self.labels = {}
         self.export = False
@@ -1852,7 +1856,7 @@ class CodeSection:
             # NOTICE: since we need use unaligned instruction, thus SP can be fixed according to PC
             for op in instr.operands:
                 if isinstance(op, Memory):
-                    if op.base is not None and (op.base.reg == 'rbp' or op.base.reg == 'rsp'):
+                    if op.base is not None and (op.base.reg == 'rbp' or op.base.reg == 'rsp' or op.base.reg == 'rip'):
                         instr.mnemonic = self.__instr_repl__[instr.mnemonic]
                         return False
         elif instr.mnemonic == 'andq' and self._is_spadj(instr):
@@ -1903,7 +1907,7 @@ class CodeSection:
                 # continue tracing, update the pcsp
                 # NOTICE: must mark pcsp at block entry because go only calculate delta value
                 pcsp.pc = self.get(bb.name)
-                if bb.func or pcsp.pc < pcsp.entry:  
+                if bb.func or pcsp.pc < pcsp.entry or bb.name == ('_'+self.name):  
                     # new func
                     pcsp = Pcsp(pcsp.pc)
                     self.funcs[bb.name] = pcsp
@@ -2066,21 +2070,26 @@ class CodeSection:
         for _, bb in self.labels.items():
             CodeSection._dfs_jump_first(bb, visited, inject)
 
-STUB_NAME = '__native_entry__'
+_STUB_NAME = '__native_entry__'
 STUB_SIZE = 67
 WITH_OFFS = os.getenv('ASM2ASM_DEBUG_OFFSET', '').lower() in ('1', 'yes', 'true')
 
+def stub_name(name :str) -> str:
+    return name+ '_entry'
+
 class Assembler:
+    name : str
     out  : List[str]
     subr : Dict[str, int]
     code : CodeSection
     vals : Dict[str, Union[str, int]]
 
-    def __init__(self):
+    def __init__(self, name: str):
+        self.name = name
         self.out  = []
         self.subr = {}
         self.vals = {}
-        self.code = CodeSection()
+        self.code = CodeSection(name)
 
     def _get(self, v: str) -> int:
         if v not in self.vals:
@@ -2291,12 +2300,43 @@ class Assembler:
         if OUTPUT_RAW:
             self._declare_body_raw()
         else:
-            self._declare_body()
+            self._declare_body(protos.keys()[0])
         self._declare_functions(protos)
 
-    def _declare_body(self):
-        self.out.append('TEXT ·%s(SB), NOSPLIT, $0' % STUB_NAME)
+    def _declare_body(self, subr :str):
+        size = self.code.stacksize(subr)
+        addr = self.code.get(subr)
+        
+        size = 8 if size <= 8 else size - 8
+        self.out.append('TEXT ·%s(SB), NOSPLIT, $%d' % (stub_name(subr), size))
         self.out.append('\tNO_LOCAL_POINTERS')
+        
+        # NOTICE: golang ASM will emit frame-entry instructions
+        frame_size = size + 8
+        pc_offset = 0
+        pc_offset += Instruction('subq', [Immediate(frame_size), Register('rsp')]).size
+        pc_offset += Instruction('movq', [Register('rbp'), Memory(Register('rsp'), Immediate(frame_size-8), None)]).size
+        pc_offset += Instruction('leaq', [Memory(Register('rsp'), Immediate(frame_size-8), None), Register('rbp')]).size
+        
+        # NOTICE: for get entry PC
+        entry_instrs = [
+            Instruction('leaq', [Memory(Register('rip'), Immediate(-7-pc_offset), None), Register('r9')]),
+            Instruction('movq', [Register('r9'), Memory(Register('rsp'), Immediate(frame_size+8), None)]),
+            Instruction('addq', [Immediate(frame_size), Register('rsp')]),
+            Instruction('retq', []),
+        ]
+        for instr in entry_instrs:
+            self.out.append('\t' + instr.encoded)
+            pc_offset += instr.size
+        
+        # C func always starts with aligned 16 bytes address
+        align_offset = math.ceil(pc_offset / 16) * 16
+        self.subr[subr] = align_offset + addr
+        
+        # NOTICE: must be pc-align to 16 manually
+        for _ in range(align_offset - pc_offset):
+            self.out.append('\tBYTE $0x00')
+        
         self._reloc()
 
         # instruction buffer
@@ -2309,6 +2349,8 @@ class Assembler:
             pc += v.size(pc)
             
     def _declare_body_raw(self):
+        self.out.append('var _text_%s = []byte{' % self.name)
+
         self._reloc()
 
         # instruction buffer
@@ -2319,20 +2361,21 @@ class Assembler:
         for v in ins:
             self.out.append(v.raw_formatted(pc))
             pc += v.size(pc)
+            
+        self.out.append('}')
+        self.out.append(' ')
 
-    def _declare_function(self, name: str, proto: Prototype):
+    def _declare_function(self, subr: str, proto: Prototype):
         offs = 0
-        subr = name[1:]
         addr = self.code.get(subr)
-        self.subr[subr] = addr
-        size = self.code.pcsp(subr, addr)        
-
+        size = self.code.pcsp(subr, addr)   
         if OUTPUT_RAW:
+            self.subr[subr] = addr
             return
         
         # function header and stack checking
         self.out.append('')
-        self.out.append('TEXT ·%s(SB), NOSPLIT | NOFRAME, $0 - %d' % (name, proto.argspace))
+        self.out.append('TEXT ·F%s(SB), NOSPLIT | NOFRAME, $0 - %d' % (subr, proto.argspace))
         self.out.append('\tNO_LOCAL_POINTERS')
         
         # add stack check if needed
@@ -2354,21 +2397,18 @@ class Assembler:
             op, reg = REG_MAP[arg.creg.reg]
             self.out.append('\t%s %s+%d(FP), %s' % (op, arg.name, offs - arg.size, reg))
 
-        # the function starts at zero
-        if addr == 0 and proto.retv is None:
-            self.out.append('\tJMP ·%s(SB)  // %s' % (STUB_NAME, subr))
-
-        # Go ASM completely ignores the offset of the JMP instruction,
-        # so we need to use indirect jumps instead for tail-call elimination
-        elif proto.retv is None:
-            self.out.append('\tLEAQ ·%s+%d(SB), AX  // %s' % (STUB_NAME, addr, subr))
-            self.out.append('\tJMP AX')
-
         # normal functions, call the real function, and return the result
-        else:
-            self.out.append('\tCALL ·%s+%d(SB)  // %s' % (STUB_NAME, addr, subr))
+        # self.out.append('\tCALL ·%s+%d(SB)  // %s' % (stub_name(name), addr, subr))
+        
+        # Notice: since Go1.21 doesn't allow use label+offset to calll, must use _subr_%s to jmpq
+        self.out.append('\tMOVQ ·_subr_%s(SB), R9' % subr)
+        self.out.append('\t' + Instruction('leaq', [Memory(Register('rip'), Immediate(5), None), Register('r10')]).encoded)
+        self.out.append('\t' + Instruction('pushq', [Register('r10')]).encoded)
+        self.out.append('\t' + Instruction('jmpq', [Register('r9')]).encoded)
+        
+        if proto.retv is not None:
             self.out.append('\t%s, %s+%d(FP)' % (' '.join(REG_MAP[proto.retv.creg.reg]), proto.retv.name, offs))
-            self.out.append('\tRET')
+        self.out.append('\tRET')
 
         # add stack growing if needed
         if size != 0:
@@ -2385,9 +2425,6 @@ class Assembler:
                 raise SyntaxError('function prototype must have a "_" prefix: ' + repr(name))
 
     def parse(self, src: List[str], proto: PrototypeMap):
-        self.code.instr(Instruction('leaq', [Memory(Register('rip'), Immediate(-7), None), Register('rax')]))
-        self.code.instr(Instruction('movq', [Register('rax'), Memory(Register('rsp'), Immediate(8), None)]))
-        self.code.instr(Instruction('retq', []))
         self._parse(src)
         # print("DEBUG...")
         # self.code.debug(0, [
@@ -2456,16 +2493,12 @@ def make_subr_filename(name: str) -> str:
     else:
         return '%s_subr_%s.go' % ('_'.join(base[:-1]), base[-1])
 
-def main():
-    src = []
-    asm = Assembler()
-    
-    
+def main(): 
     # check for arguments
     if len(sys.argv) < 3:
         print('* usage: %s [-r|-d] <output-file> <clang-asm> ...' % sys.argv[0], file = sys.stderr)
         sys.exit(1)
-
+    
     # check if optional flag is enabled
     global OUTPUT_RAW
     OUTPUT_RAW = False
@@ -2480,9 +2513,14 @@ def main():
                 sys.argv.pop()
                 continue
             i += 1
+         
+    src = []   
+    fpath = os.path.splitext(sys.argv[1])[0]
+    fname = os.path.basename(fpath)
+    asm = Assembler(fname)
             
     # parse the prototype
-    with open(os.path.splitext(sys.argv[1])[0] + '.go', 'r', newline = None) as fp:
+    with open(fpath + '.go', 'r', newline = None) as fp:
         pkg, proto = PrototypeMap.parse(fp.read())
 
     # read all the sources, and combine them together
@@ -2497,8 +2535,6 @@ def main():
         asm.out.append('')
         asm.out.append('package %s' % pkg)
         asm.out.append('')
-        ## native text
-        asm.out.append('var Text%s = []byte{' % STUB_NAME)
     else:
         asm.out.append('// +build !noasm !appengine')
         asm.out.append('// Code generated by asm2asm, DO NOT EDIT.')
@@ -2509,23 +2545,19 @@ def main():
         asm.out.append('')
         
     asm.parse(src, proto)
-
+    
     if OUTPUT_RAW:
-        asrc = os.path.splitext(sys.argv[1])[0]
-        asrc = asrc[:asrc.rfind('_')] + '_text_amd64.go'
+        asrc = fpath + '_text_amd64.go'
     else:
-        asrc = os.path.splitext(sys.argv[1])[0] + '.s'
+        asrc = fpath + '_amd64.s'
       
     # save the converted result  
-    with open(asrc, 'w')  as fp:
+    with open(asrc, 'w')  as fp:  
         for line in asm.out:
             print(line, file = fp)
-        if OUTPUT_RAW:
-            print('}', file = fp)
-
+            
     # calculate the subroutine stub file name
-    subr = make_subr_filename(sys.argv[1])
-    subr = os.path.join(os.path.dirname(sys.argv[1]), subr)
+    subr = os.path.join(os.path.dirname(sys.argv[1]), make_subr_filename(sys.argv[1]))
 
     # save the compiled code stub
     with open(subr, 'w') as fp:
@@ -2539,10 +2571,9 @@ def main():
             return 
         
         if OUTPUT_RAW:
+            # dump every entry for all functions
             print(file = fp)
             print('import (\n\t`github.com/bytedance/sonic/loader`\n)', file = fp)
-            
-            # dump every entry for all functions
             print(file = fp)
             print('const (', file = fp)
             for name in asm.code.funcs.keys():
@@ -2579,27 +2610,28 @@ def main():
             
             # insert native entry info
             print(file = fp)
-            print('var Funcs = []loader.CFunc{', file = fp)
-            print('    {"%s", 0, %d, 0, nil},' % (STUB_NAME, STUB_SIZE), file = fp)
-            # dump every native function info for all functions
             for name in asm.code.funcs.keys():
+                print('var _cfunc%s = []loader.CFunc{' % name, file = fp)
+                print('    {"%s_entry", 0,  _entry_%s, 0, nil},' % (name, name), file = fp)
                 print('    {"%s", _entry_%s, _size_%s, _stack_%s, _pcsp_%s},' % (name, name, name, name, name), file = fp)
             print('}', file = fp)
 
         else:
-            # native entry for entry function
             print(file = fp)
             print('//go:nosplit', file = fp)
             print('//go:noescape', file = fp)
             print('//goland:noinspection ALL', file = fp)
-            print('func %s() uintptr' % STUB_NAME, file = fp)
+            
+            # native entry for entry function
+            for name in asm.subr.keys():
+                print('func %s() uintptr' % stub_name(name), file = fp)
             
             # dump exported function entry for exported functions
             print(file = fp)
             print('var (', file = fp)
             mlen = max(len(s) for s in asm.subr)
             for name, entry in asm.subr.items():
-                print('    _subr_%s uintptr = %s() + %d' % (name.ljust(mlen, ' '), STUB_NAME, entry), file = fp)
+                print('    _subr_%s uintptr = %s() + %d' % (name.ljust(mlen, ' '), stub_name(name), entry), file = fp)
             print(')', file = fp)
 
             # dump max stack depth for exported functions
