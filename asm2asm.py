@@ -531,6 +531,8 @@ class Instruction:
         'MOVSBQ' : 1,
         'MOVSWQ' : 2,
         'MOVSLQ' : 4,
+        'SETNE'  : 1,
+        'SETNZ'  : 1,
     }
 
     @staticmethod
