@@ -465,6 +465,10 @@ class Instruction:
         'MOVABSQ'    : x86_64.MOV,
         'VCMPEQPS'   : VectorCompare(x86_64.VCMPPS, 0x00),
         'VCMPTRUEPS' : VectorCompare(x86_64.VCMPPS, 0x0f),
+        'VCVTSI2SDL' : x86_64.VCVTSI2SD,
+        'VCVTSI2SDQ' : x86_64.VCVTSI2SD,
+        'CVTSI2SDQ' : x86_64.CVTSI2SD,
+        'CVTSI2SDL' : x86_64.CVTSI2SD,
     }
 
     @functools.cached_property
@@ -532,6 +536,14 @@ class Instruction:
         'MOVSBQ' : 1,
         'MOVSWQ' : 2,
         'MOVSLQ' : 4,
+        'SETNE'  : 1,
+        'SETNZ'  : 1,
+        'SETLE'  : 1,
+        'SETNLE' : 1,
+        'SETG'   : 1,
+        'SETNG'  : 1,
+        'SETGE'  : 1,
+        'SETNGE' : 1,
     }
 
     @staticmethod
