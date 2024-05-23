@@ -2069,19 +2069,11 @@ class CodeSection:
             self.labels[name].func = True
             return self._trace_block(self.labels[name], pcsp)
         
-    def debug(self, pos: int, inss: List[Instruction]):
-        def inject(bb: BasicBlock) -> bool:
-            if (not bb.func) and (bb.name not in self.funcs):
-                return True
-            nonlocal pos
-            if pos >= len(bb.body):
-                return
-            for ins in inss:
-                bb.body.insert(pos, ins)  
-                pos += 1
-        visited = {}
-        for _, bb in self.labels.items():
-            CodeSection._dfs_jump_first(bb, visited, inject)
+    def debug(self, label: str, pos: int, inss: List[Instruction]):
+        b = self.labels.get(label)
+        for ins in inss:
+            b.body.insert(pos, ins)  
+            pos += 1
 
 _STUB_NAME = '__native_entry__'
 STUB_SIZE = 67
@@ -2439,12 +2431,13 @@ class Assembler:
 
     def parse(self, src: List[str], proto: PrototypeMap):
         self._parse(src)
-        # print("DEBUG...")
-        # self.code.debug(0, [
-        #     X86Instr(Instruction('int3', []))
-        #     # X86Instr(Instruction('xorq', [Register('rax'), Register('rax')])),
-        #     # X86Instr(Instruction('movq', [Memory(Register('rax'), Immediate(0), None), Register('rax')]))
-        # ])
+        if len(DEBUG_POS) > 2 and self.name == DEBUG_POS[0]:
+            print("DEBUG for file '%s' label '%s' instr %s" % (DEBUG_POS[0], DEBUG_POS[1], DEBUG_POS[2]))
+            self.code.debug(DEBUG_POS[1], int(DEBUG_POS[2]), [
+                # X86Instr(Instruction('int3', []))
+                X86Instr(Instruction('xorq', [Register('rbx'), Register('rbx')])),
+                X86Instr(Instruction('movq', [Register('rbx'), Memory(Register('rbx'), Immediate(0), None)]))
+            ])
         self._declare(proto)
 
 GOOS = {
@@ -2512,6 +2505,11 @@ IGNORED_STUBS = {
     "_write_syscall"
 }
 
+def remove_one_arg(i: int, args: list[str]):
+    for j in range(i, len(args)-1):
+        args[j] = args[j + 1]  
+    args.pop()
+
 def main(): 
     # check for arguments
     if len(sys.argv) < 3:
@@ -2521,15 +2519,21 @@ def main():
     # check if optional flag is enabled
     global OUTPUT_RAW
     OUTPUT_RAW = False
+    global DEBUG_POS
+    DEBUG_POS = []
     if len(sys.argv) >= 4:
         i = 0
         while i<len(sys.argv):
             flag = sys.argv[i]
             if flag == '-r':
                 OUTPUT_RAW = True
-                for j in range(i, len(sys.argv)-1):
-                    sys.argv[j] = sys.argv[j + 1]  
-                sys.argv.pop()
+                remove_one_arg(i, sys.argv)
+                continue
+            if flag == '-d':
+                remove_one_arg(i, sys.argv)
+                val = sys.argv[i]
+                remove_one_arg(i, sys.argv)
+                DEBUG_POS = val.split(":")
                 continue
             i += 1
          
