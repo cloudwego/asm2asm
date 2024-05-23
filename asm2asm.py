@@ -465,6 +465,10 @@ class Instruction:
         'MOVABSQ'    : x86_64.MOV,
         'VCMPEQPS'   : VectorCompare(x86_64.VCMPPS, 0x00),
         'VCMPTRUEPS' : VectorCompare(x86_64.VCMPPS, 0x0f),
+        'VCVTSI2SDL' : x86_64.VCVTSI2SD,
+        'VCVTSI2SDQ' : x86_64.VCVTSI2SD,
+        'CVTSI2SDQ' : x86_64.CVTSI2SD,
+        'CVTSI2SDL' : x86_64.CVTSI2SD,
     }
 
     @functools.cached_property
@@ -532,6 +536,14 @@ class Instruction:
         'MOVSBQ' : 1,
         'MOVSWQ' : 2,
         'MOVSLQ' : 4,
+        'SETNE'  : 1,
+        'SETNZ'  : 1,
+        'SETLE'  : 1,
+        'SETNLE' : 1,
+        'SETG'   : 1,
+        'SETNG'  : 1,
+        'SETGE'  : 1,
+        'SETNGE' : 1,
     }
 
     @staticmethod
@@ -1846,6 +1858,7 @@ class CodeSection:
     __instr_repl__ = {
         'movdqa'  : 'movdqu',
         'movaps'  : 'movups',
+        'movapd'  : 'movupd',
         'vmovdqa' : 'vmovdqu',
         'vmovaps' : 'vmovups',
         'vmovapd' : 'vmovupd',
@@ -2493,6 +2506,12 @@ def make_subr_filename(name: str) -> str:
     else:
         return '%s_subr_%s.go' % ('_'.join(base[:-1]), base[-1])
 
+
+IGNORED_STUBS = {
+    "_do_xprintf",
+    "_write_syscall"
+}
+
 def main(): 
     # check for arguments
     if len(sys.argv) < 3:
@@ -2576,6 +2595,13 @@ def main():
             print('import (\n\t`github.com/bytedance/sonic/loader`\n)', file = fp)
             print(file = fp)
             print('const (', file = fp)
+
+            # remove duplicated symbols
+            keys = list(asm.code.funcs.keys())
+            for name in keys:
+                if name in IGNORED_STUBS:
+                    asm.code.funcs.pop(name)
+            
             for name in asm.code.funcs.keys():
                 addr = asm.code.get(name)
                 if addr is not None:
@@ -2614,7 +2640,7 @@ def main():
                 print('var _cfunc%s = []loader.CFunc{' % name, file = fp)
                 print('    {"%s_entry", 0,  _entry_%s, 0, nil},' % (name, name), file = fp)
                 print('    {"%s", _entry_%s, _size_%s, _stack_%s, _pcsp_%s},' % (name, name, name, name, name), file = fp)
-            print('}', file = fp)
+                print('}', file = fp)
 
         else:
             print(file = fp)
