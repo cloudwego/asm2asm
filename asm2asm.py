@@ -965,6 +965,7 @@ class Parameter:
 class Pcsp:
     entry: int
     maxpc: int
+    maxpc_sp: int
     out  : List[Tuple[int, int]]
     pc   : int
     sp   : int
@@ -985,6 +986,8 @@ class Pcsp:
     def optimize(self):
         # push the last record
         self.out.append((self.pc - self.entry, self.sp))
+        # push the max pc
+        self.out.append((self.maxpc - self.entry, self.maxpc_sp))
         # sort by pc
         self.out.sort(key=lambda x: x[0])
         # NOTICE: first pair {1, 0} to be compitable with golang
@@ -1009,6 +1012,7 @@ class Pcsp:
         self.sp += dsp
         if self.pc > self.maxpc:
             self.maxpc = self.pc
+            self.maxpc_sp = self.sp
 
 class Prototype:
     args: List[Parameter]
