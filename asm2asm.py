@@ -3,6 +3,7 @@
 
 import math
 import os
+import re
 import sys
 import string
 import itertools
@@ -980,7 +981,7 @@ class Pcsp:
     def __str__(self) -> str:
         ret = '[][2]uint32{\n'
         for pc, sp in self.out:
-            ret += '        {%d, %d},\n' % (pc, sp)
+            ret += '        {0x%x, %d},\n' % (pc, sp)
         return ret + '    }'
     
     def optimize(self):
@@ -1007,8 +1008,9 @@ class Pcsp:
         self.out = tmp
     
     def update(self, dpc: int, dsp: int):
-        self.out.append((self.pc - self.entry, self.sp))
+        # pcsp table is as [)
         self.pc += dpc
+        self.out.append((self.pc - self.entry, self.sp))
         self.sp += dsp
         if self.pc > self.maxpc:
             self.maxpc = self.pc
@@ -1830,11 +1832,10 @@ class CodeSection:
                ins.operands[1].reg == 'rsp'
 
     @staticmethod
-    def _is_spmove(ins: Instruction, i: int) -> bool:
-        return len(ins.operands) == 2                and \
-               isinstance(ins.operands[0], Register) and \
-               isinstance(ins.operands[1], Register) and \
-               ins.operands[i].reg == 'rsp'
+    def _is_leaqsp(ins: Instruction) -> bool:
+        return  len(ins.operands) == 2 and ins.mnemonic == "leaq" and \
+                isinstance(ins.operands[len(ins.operands) - 1], Register) and \
+                ins.operands[len(ins.operands) - 1].reg == 'rsp'
 
     @staticmethod
     def _is_rjump(ins: Optional[Instr]) -> bool:
@@ -1961,7 +1962,7 @@ class CodeSection:
         
         if bb.jump:
             if bb.jump.jmptab:
-                cases = self.get_jmptab(bb.jump.name)                    
+                cases = self.get_jmptab(bb.jump.name)
                 for case in cases:
                     nsp = self._trace_block(case, pcsp)
                     if pcsp:
@@ -1991,10 +1992,15 @@ class CodeSection:
         # scan every instruction
         for ins in bb.body:
             diff = 0
-            
+
+            # skip label instructions
+            if isinstance(ins, LabelInstr):
+                continue
+                
             if isinstance(ins, X86Instr):
                 name = ins.instr.mnemonic
                 args = ins.instr.operands
+                text = str(ins.instr)
 
                 # check for instructions
                 if name == 'retq':
@@ -2004,13 +2010,17 @@ class CodeSection:
                 elif name == 'pushq':
                     diff = 8
                 elif name == 'addq' and self._is_spadj(ins.instr):
-                    diff = -self._mk_align(args[0].val)
+                    diff = -args[0].val
                 elif name == 'subq' and self._is_spadj(ins.instr):
-                    diff = self._mk_align(args[0].val)
-                    
+                    diff = args[0].val
+                elif self._is_leaqsp(ins.instr):
+                    # when use `leaq 0ximm(%rbp) %rsp` instruction
+                    diff = -(pcsp.sp + args[0].disp.val - 8)
                 # FIXME: andq is usually used for aligment of memory address, we can't handle it correctly now
-                # elif name == 'andq' and self._is_spadj(ins.instr): 
-                #     diff = self._mk_align(max(-args[0].val - 8, 0))
+                elif name == 'andq' and self._is_spadj(ins.instr): 
+                    raise SyntaxError('not support calculate pcsp from andq %rsp intrsuction', ins.instr)
+                elif ", %rsp" in text:
+                    raise SyntaxError('not support calculate pcsp from the intrsuction', ins.instr)
                 
                 cursp += diff
                 
@@ -2022,7 +2032,7 @@ class CodeSection:
                 if cursp > maxsp:
                     maxsp = cursp
             
-            # update pcsp   
+            # update pcsp
             if pcsp:
                 pcsp.update(ins.size(pcsp.pc), diff)
 
@@ -2375,6 +2385,9 @@ class Assembler:
         self.out.append(' ')
 
     def _declare_function(self, subr: str, proto: Prototype):
+        # HACK: ignore the mocked symbols
+        if "mock" in subr:
+            return
         offs = 0
         addr = self.code.get(subr)
         size = self.code.pcsp(subr, addr)   
@@ -2582,7 +2595,31 @@ def main():
     with open(asrc, 'w')  as fp:  
         for line in asm.out:
             print(line, file = fp)
+    
+    # dump the mocked function
+    with open(fpath + '_mock_text_amd64_test.go', 'w') as fp:
+        for line in asm.out:
+            # replace stubr
+            if "var _text_" in line:
+                line = line.replace("var _text_", "var _mock_text_")
             
+            # check all non-sp instructions
+            subsp = "subq"  in line and ", %rsp" in line
+            addsp = "addq"  in line and ", %rsp" in line
+            movbp = "movq"  in line and ", %rbp" in line
+            popq  = "popq"  in line
+            pushq = "pushq" in line
+            ret   = "retq"  in line and "0xc3,"  in line
+            leaq  = "leaq"  in line and ", %rsp" in line
+        
+            # replace all non-sp instructions
+            if "//" in line and not subsp and not addsp and not popq and not pushq and not ret and not leaq and not movbp:
+                newline = re.sub(r"0x\w{2}", "0xcc", line.split("//")[0]) + "//" + line.split("//")[1]
+            else:
+                newline = line
+            print(newline, file = fp)
+
+
     # calculate the subroutine stub file name
     subr = os.path.join(os.path.dirname(sys.argv[1]), make_subr_filename(sys.argv[1]))
 
