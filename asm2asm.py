@@ -3,11 +3,11 @@
 
 import math
 import os
-import re
 import sys
 import string
 import itertools
 import functools
+import argparse
 
 from typing import Any
 from typing import Dict
@@ -1141,7 +1141,7 @@ class PrototypeMap(Dict[str, Prototype]):
                 idx, pkg = idx + 1, line[7:].strip().split()[0]
                 continue
 
-            if OUTPUT_RAW:
+            if ARGS.raw:
                 
                 # extract funcname like "[var ]{funcname} = func(..."
                 end = line.find('func(')
@@ -2316,7 +2316,7 @@ class Assembler:
         ref.resolve(self.code.get(str(ref.ref)) - rip)
 
     def _declare(self, protos: PrototypeMap):
-        if OUTPUT_RAW:
+        if ARGS.raw:
             self._declare_body_raw()
         else:
             self._declare_body(protos.keys()[0])
@@ -2385,13 +2385,10 @@ class Assembler:
         self.out.append(' ')
 
     def _declare_function(self, subr: str, proto: Prototype):
-        # HACK: ignore the mocked symbols
-        if "mock" in subr:
-            return
         offs = 0
         addr = self.code.get(subr)
         size = self.code.pcsp(subr, addr)   
-        if OUTPUT_RAW:
+        if ARGS.raw:
             self.subr[subr] = addr
             return
         
@@ -2448,9 +2445,9 @@ class Assembler:
 
     def parse(self, src: List[str], proto: PrototypeMap):
         self._parse(src)
-        if len(DEBUG_POS) > 2 and self.name == DEBUG_POS[0]:
-            print("DEBUG for file '%s' label '%s' instr %s" % (DEBUG_POS[0], DEBUG_POS[1], DEBUG_POS[2]))
-            self.code.debug(DEBUG_POS[1], int(DEBUG_POS[2]), [
+        if len(ARGS.debug) > 2 and self.name == ARGS.debug[0]:
+            print("DEBUG for file '%s' label '%s' instr %s" % (ARGS.debug[0], ARGS.debug[1], ARGS.debug[2]))
+            self.code.debug(ARGS.debug[1], int(ARGS.debug[2]), [
                 # X86Instr(Instruction('int3', []))
                 X86Instr(Instruction('xorq', [Register('rbx'), Register('rbx')])),
                 X86Instr(Instruction('movq', [Register('rbx'), Memory(Register('rbx'), Immediate(0), None)]))
@@ -2502,19 +2499,20 @@ GOARCH = {
     'wasm',
 }
 
-def make_subr_filename(name: str) -> str:
-    name = os.path.basename(name)
+def make_subr_filename(stub_file: str) -> str:
+    name = os.path.basename(stub_file)
     base = os.path.splitext(name)[0].rsplit('_', 2)
-
     # construct the new name
-    if base[-1] in GOOS:
-        return '%s_subr_%s.go' % ('_'.join(base[:-1]), base[-1])
-    elif base[-1] not in GOARCH:
-        return '%s_subr.go' % '_'.join(base)
-    elif len(base) > 2 and base[-2] in GOOS:
-        return '%s_subr_%s_%s.go' % ('_'.join(base[:-2]), base[-2], base[-1])
-    else:
-        return '%s_subr_%s.go' % ('_'.join(base[:-1]), base[-1])
+    def getname(base: str):
+        if base[-1] in GOOS:
+            return '%s_subr_%s.go' % ('_'.join(base[:-1]), base[-1])
+        elif base[-1] not in GOARCH:
+            return '%s_subr.go' % '_'.join(base)
+        elif len(base) > 2 and base[-2] in GOOS:
+            return '%s_subr_%s_%s.go' % ('_'.join(base[:-2]), base[-2], base[-1])
+        else:
+            return '%s_subr_%s.go' % ('_'.join(base[:-1]), base[-1])
+    return os.path.join(os.path.dirname(stub_file), getname(base))
 
 
 IGNORED_STUBS = {
@@ -2522,54 +2520,42 @@ IGNORED_STUBS = {
     "_write_syscall"
 }
 
-def remove_one_arg(i: int, args: list[str]):
-    for j in range(i, len(args)-1):
-        args[j] = args[j + 1]  
-    args.pop()
-
-def main(): 
-    # check for arguments
-    if len(sys.argv) < 3:
-        print('* usage: %s [-r|-d] <output-file> <clang-asm> ...' % sys.argv[0], file = sys.stderr)
-        sys.exit(1)
+def make_output_file(stub_file: str) -> str:
+    fpath = os.path.splitext(stub_file)[0]
+    if ARGS.raw:
+        return fpath + '_text_amd64.go'
+    else:
+        return fpath + '_amd64.s'
     
-    # check if optional flag is enabled
-    global OUTPUT_RAW
-    OUTPUT_RAW = False
-    global DEBUG_POS
-    DEBUG_POS = []
-    if len(sys.argv) >= 4:
-        i = 0
-        while i<len(sys.argv):
-            flag = sys.argv[i]
-            if flag == '-r':
-                OUTPUT_RAW = True
-                remove_one_arg(i, sys.argv)
-                continue
-            if flag == '-d':
-                remove_one_arg(i, sys.argv)
-                val = sys.argv[i]
-                remove_one_arg(i, sys.argv)
-                DEBUG_POS = val.split(":")
-                continue
-            i += 1
-         
-    src = []   
-    fpath = os.path.splitext(sys.argv[1])[0]
-    fname = os.path.basename(fpath)
-    asm = Assembler(fname)
-            
+    
+def main():
+    argparser = argparse.ArgumentParser(description='Tools to translate Clang asm to Go asm. Example: ./asm2asm.py -r lspace.go lspace.s')
+    argparser.add_argument('-r',  dest='raw', action='store_true', required=False,
+        help='Dump raw binray into .go file.')
+    argparser.add_argument('-d',  dest='debug', required=False,
+        help='Specify the debug position in the format of <file>:<label>:<instr>.')
+    argparser.add_argument('stub_file', type=str, help='The Golang stub file')
+    argparser.add_argument('input_files', type=str, nargs='+', help='Input assembly files. Should be generated by Clang.')
+
+    global ARGS
+    ARGS = argparser.parse_args()
+    ARGS.debug = ARGS.debug.split(":") if ARGS.debug else []
+
+    basename = os.path.splitext(os.path.basename(ARGS.stub_file))[0]
+    asm = Assembler(basename)
+
     # parse the prototype
-    with open(fpath + '.go', 'r', newline = None) as fp:
+    with open(ARGS.stub_file, 'r', newline = None) as fp:
         pkg, proto = PrototypeMap.parse(fp.read())
 
     # read all the sources, and combine them together
-    for fn in sys.argv[2:]:
+    src = []   
+    for fn in ARGS.input_files:
         with open(fn, 'r', newline = None) as fp:
             src.extend(fp.read().splitlines())
 
     # convert the original sources
-    if OUTPUT_RAW:
+    if ARGS.raw:
         asm.out.append('// +build amd64')
         asm.out.append('// Code generated by asm2asm, DO NOT EDIT.')
         asm.out.append('')
@@ -2586,42 +2572,14 @@ def main():
         
     asm.parse(src, proto)
     
-    if OUTPUT_RAW:
-        asrc = fpath + '_text_amd64.go'
-    else:
-        asrc = fpath + '_amd64.s'
+
       
     # save the converted result  
-    with open(asrc, 'w')  as fp:  
+    with open(make_output_file(ARGS.stub_file), 'w')  as fp:  
         for line in asm.out:
             print(line, file = fp)
-    
-    # dump the mocked function
-    with open(fpath + '_mock_text_amd64_test.go', 'w') as fp:
-        for line in asm.out:
-            # replace stubr
-            if "var _text_" in line:
-                line = line.replace("var _text_", "var _mock_text_")
-            
-            # check all non-sp instructions
-            subsp = "subq"  in line and ", %rsp" in line
-            addsp = "addq"  in line and ", %rsp" in line
-            movbp = "movq"  in line and ", %rbp" in line
-            popq  = "popq"  in line
-            pushq = "pushq" in line
-            ret   = "retq"  in line and "0xc3,"  in line
-            leaq  = "leaq"  in line and ", %rsp" in line
-        
-            # replace all non-sp instructions
-            if "//" in line and not subsp and not addsp and not popq and not pushq and not ret and not leaq and not movbp:
-                newline = re.sub(r"0x\w{2}", "0xcc", line.split("//")[0]) + "//" + line.split("//")[1]
-            else:
-                newline = line
-            print(newline, file = fp)
-
-
     # calculate the subroutine stub file name
-    subr = os.path.join(os.path.dirname(sys.argv[1]), make_subr_filename(sys.argv[1]))
+    subr = make_subr_filename(ARGS.stub_file)
 
     # save the compiled code stub
     with open(subr, 'w') as fp:
@@ -2634,7 +2592,7 @@ def main():
         if not asm.subr:
             return 
         
-        if OUTPUT_RAW:
+        if ARGS.raw:
             # dump every entry for all functions
             print(file = fp)
             print('import (\n\t`github.com/bytedance/sonic/loader`\n)', file = fp)
