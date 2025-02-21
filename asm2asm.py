@@ -1155,8 +1155,8 @@ class PrototypeMap(Dict[str, Prototype]):
                 # function names must be identifiers
                 if not name.isidentifier():
                     raise cls._err('invalid function prototype: ' + name)
-                if not name.startswith('F'):
-                    raise cls._err('please do not declare func stub with `F` prefix')
+                if name.startswith('F'):
+                    raise cls._err('please do not declare func stub with `F` prefix: '+name)
                 # register a empty prototype
                 ret[name[1:]] = Prototype(None, [])
                 idx += 1
